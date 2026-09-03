@@ -6,8 +6,9 @@ import { eq } from "drizzle-orm";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import config from "../config/config.ts";
+import { getUserByGuid } from "../services/user.service.ts";
 
-const authHandler = asyncHandler(async (req, res) => {
+export const registerHandler = asyncHandler(async (req, res) => {
   const { username, email, password } = req.body;
   const hashing = 10;
   if (!username || !email || !password) {
@@ -27,21 +28,93 @@ const authHandler = asyncHandler(async (req, res) => {
 
   const hashedPassword = await bcrypt.hash(password, hashing);
 
-  const newuser = await db
+  const [newuser] = await db
     .insert(usersTable)
     .values({ username, email, password: hashedPassword })
-    .returning({
-      username: usersTable.username,
-      email: usersTable.email,
-      createdat: usersTable.created_at,
-    });
+    .returning();
 
-  const token = jwt.sign({ email }, config.JWT_SECERT_KEY, { expiresIn: "1h" });
+  const accessToken = jwt.sign({ id: newuser?.guid }, config.JWT_SECERT_KEY, {
+    expiresIn: "15min",
+  });
+
+  const refreshToken = jwt.sign({ id: newuser?.guid }, config.JWT_SECERT_KEY, {
+    expiresIn: "1d",
+  });
+
+  res.cookie("refreshToken", refreshToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "strict",
+    maxAge: 1 * 24 * 60 * 60 * 1000,
+  });
 
   res.status(201).json({
     message: "User registered successfully.",
-    user: { data: newuser, token: token },
+    data: { username: newuser?.username, email: newuser?.email },
+    token: accessToken,
   });
 });
 
-export default authHandler;
+export const tokenHandler = asyncHandler(async (req, res) => {
+  let token = req.headers.authorization?.split(" ")[1] ?? "";
+
+  if (!token) {
+    res.status(500).json({ message: "No Token found" });
+    return;
+  }
+
+  const decoded = jwt.verify(token, config.JWT_SECERT_KEY);
+
+  if (typeof decoded === "string" || typeof decoded.id !== "string") {
+    res.status(401).json({ message: "Invalid token." });
+    return;
+  }
+
+  const user = await getUserByGuid(decoded.id);
+  console.log(user);
+
+  res.status(200).json({
+    message: "user fetched successfully",
+    user: {
+      username: user?.username,
+      email: user?.email,
+    },
+  });
+});
+
+export const refreshTokenHandler = asyncHandler(async (req, res) => {
+  const refreshToken = req.cookies.refreshToken;
+
+  if (!refreshToken) {
+    res.status(401).json({
+      message: "Refresh token not found",
+    });
+  }
+
+  const decoded = jwt.verify(refreshToken, config.JWT_SECERT_KEY);
+
+  if (typeof decoded === "string" || typeof decoded.id !== "string") {
+    res.status(401).json({ message: "Invalid token." });
+    return;
+  }
+
+  const accessToken = jwt.sign({ id: decoded.id }, config.JWT_SECERT_KEY, {
+    expiresIn: "15m",
+  });
+
+  const newRefreshToken = jwt.sign({ id: decoded.id }, config.JWT_SECERT_KEY, {
+    expiresIn: "1d",
+  });
+
+  res.cookie("refreshToken", newRefreshToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "strict",
+    maxAge: 1 * 24 * 60 * 60 * 1000,
+  });
+
+  res.status(200).json({
+    message: "Access token refreshed successfully",
+    accessToken,
+  });
+});
